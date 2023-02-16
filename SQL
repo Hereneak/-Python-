@@ -1,0 +1,136 @@
+--1.В каких городах больше одного аэропорта?
+
+select city "Город", count(city) "Кол-во аэропортов" 
+from airports                       
+group by city                       
+having count(*)>1                   
+
+--2.В каких аэропортах есть рейсы, выполняемые самолетом с максимальной дальностью перелета?               
+
+select airport_name "Аэропорт", range "Дальность полета"     
+from aircrafts a 
+join flights f on f.aircraft_code = a.aircraft_code 
+join airports a2 on f.arrival_airport  = a2.airport_code
+group by 1,2                                                
+having range in (                                          
+	select max(range)                                       
+	from aircrafts a) 
+		 
+--3.Вывести 10 рейсов с максимальным временем задержки вылета                  
+
+select flight_id "Рейс", actual_departure-scheduled_departure "Задержка вылета" 
+from flights f                                                                  
+where actual_departure is not null            
+group by flight_id                            
+order by "Задержка вылета" desc                
+limit 10                                  
+
+--4.Были ли брони, по которым не были получены посадочные талоны?                                          
+
+--неуникальные
+select t.book_ref, boarding_no           
+from tickets t  
+left join boarding_passes bp on bp.ticket_no = t.ticket_no 
+where boarding_no is null                                     
+--уникальные
+select distinct t.book_ref,boarding_no
+from tickets t  
+left join boarding_passes bp on bp.ticket_no = t.ticket_no 
+where boarding_no is null
+
+--ответ Да
+
+--5.Найдите количество свободных мест для каждого рейса, 
+   --их % отношение к общему количеству мест в самолете.
+   --Добавьте столбец с накопительным итогом - 
+   --суммарное накопление количества вывезенных пассажиров из каждого аэропорта на каждый день.            
+   --Т.е. в этом столбце должна отражаться накопительная сумма - 
+   --сколько человек уже вылетело из данного аэропорта на этом или более ранних рейсах в течении дня.
+
+
+select flight_id, flight_no,
+	q.cs-q.ct "кол-во свободных мест", 
+	round((q.cs-q.ct)*100./q.cs,1) "% свободных мест к общ. кол-ву мест",   
+	sum(q.ct) over (partition by da, ad::date order by ad) "Sum passenger"   
+from (                                                       
+	    select f.flight_no, f.flight_id, f.aircraft_code, actual_departure ad, departure_airport da, 
+	    	count(ticket_no) ct,cs                                                   
+	    from (                                                                         
+	    	 select aircraft_code,count(*) cs   
+		     from seats s
+		     group by 1) c 
+	    join flights f on f.aircraft_code = c.aircraft_code
+	    left join ticket_flights tf on f.flight_id = tf.flight_id 
+	    where status = 'Arrived' or status = 'Departed'      
+	    group by f.flight_id,c.cs) q                        
+  	    	    
+
+--6.Найдите процентное соотношение перелетов по типам самолетов от общего количества.                    
+
+--explain analyze 	
+--select sum("соотношение перелетов") 
+--from(
+select aircraft_code,                  
+    round(count(*)*100./ (               
+            select count(*)             
+    		from flights f 
+    		where actual_departure is not null),1) "соотношение перелетов"
+from flights f
+where actual_departure is not null         
+group by 1--) g
+
+--7.Были ли города, в которые можно  добраться бизнес - классом дешевле, 
+    --чем эконом-классом в рамках перелета?                                                               
+
+with c as (                                                     
+	select a.city d ,a2.city a,tf.fare_conditions,tf.amount,     
+			case                                                 
+				when tf.fare_conditions  = 'Business' then amount  
+			end b,
+			case 
+				when tf.fare_conditions  = 'Economy' then amount 
+			end e
+	from ticket_flights tf 
+	join flights f on tf.flight_id = f.flight_id 
+	join airports a on f.departure_airport = a.airport_code    
+	join airports a2 on f.arrival_airport = a2.airport_code
+	group by 1,2,3,4
+	)                                                     
+select d "Город отправления",a "Город прибытия" ,           
+	min(c.b) "с-ть бизнес-кл.",
+	max(c.e) "с-ть эконом-кл."	
+from c
+group by 1,2                                              
+having min(c.b) < max(c.e)                               
+
+--8.Между какими городами нет прямых рейсов?                                                  
+
+create view city_to_city as                                                           
+select distinct a.city "Город отправления",a2.city "Город прибытия"                                                      
+from flights f 
+join airports a on a.airport_code = f.departure_airport 
+join airports a2 on a2.airport_code = f.arrival_airport
+
+select distinct a.city "Город отправления",a2.city "Город прибытия"     
+from airports a ,airports a2                                           
+where a.city <> a2.city                                               
+except                                                                
+select * from city_to_city ctc                                       
+
+--9.Вычислите расстояние между аэропортами, связанными прямыми рейсами,                         
+    --сравните с допустимой максимальной дальностью перелетов  в самолетах,                   
+    --обслуживающих эти рейсы *                                                      
+ 
+select distinct d.airport_name "Аэропорт отправления",a.airport_name "Аэропорт прибытия",     
+	round((acos(sind(d.latitude) * sind(a.latitude) + cosd(d.latitude) * cosd(a.latitude) *      
+		   cosd(d.longitude - a.longitude)) * 6371)::numeric ,1)  "Расстояние между аэропортами",
+    case                                                                                         
+    	when range > acos(sind(d.latitude) * sind(a.latitude) + cosd(d.latitude) *   
+    	             cosd(a.latitude) * cosd(d.longitude - a.longitude)) * 6371         
+    	then 'Д-ть самолета >'                                                        
+    	else 'Д-ть самолета <'                                                       
+    end "Сравнение"
+from flights f                                                                      
+join airports d on f.departure_airport = d.airport_code                             
+join airports a on f.arrival_airport = a.airport_code                                
+join aircrafts a3 on a3.aircraft_code = f.aircraft_code 
